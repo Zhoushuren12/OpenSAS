@@ -1,0 +1,7 @@
+在 PowerShell 里执行：
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+
+如果提示确认，输入：
+Y
+
+可以放开Powershell的权限

@@ -1,0 +1,60 @@
+修改记录（SMAFDB）
+日期：2026-02-25
+
+1) SMAFDB_pts 读取 L1/L2 逻辑调整
+- 文件：subroutines/SMAFDB.py
+- 变更：
+  - SMAFDB_pts 中，L1/L2 改为优先从 sma_iter_config.json 读取。
+  - 当配置中 L1/L2 缺失或小于 1.0 时，按几何关系回算：
+    - L1 = sqrt(h1^2 + (L_bay_edge/2)^2)
+    - L2 = sqrt(h2^2 + (L_bay_edge/2)^2)（若仅一层则 L2=L1）
+- 目的：
+  - 与 SMAdamper.SMA_pts 的处理方式保持一致。
+
+2) SMAFDB 增加固定 MinMax 位移限值（不随配置文件变化）
+- 文件：subroutines/SMAFDB.py
+- 变更：
+  - 在 SMAFDB() 中新增可选参数 MinMax（默认 None）。
+  - 若外部未传 MinMax，自动按 SpringID 映射层号（11~14 为1层，21~24 为2层，...，81~84 为8层）。
+  - 对应每层自动套用固定 MinMax（包裹在 Series(SMA,Steel01) 外）：
+    - 使用固定几何：层高 [5400, 4200, 4200, 4200, 4200, 4200, 4200, 4200] mm
+    - 使用固定跨宽：6100 mm
+    - 使用固定层间位移角：10%（0.10）
+    - 计算公式：
+      - alpha = atan(h/(bay/2))
+      - delta_sma = 0.10*h*cos(alpha)
+      - MinMax = [-delta_sma, +delta_sma]
+  - twoNodeLink 最终材料从原 Series 改为 MinMax(Series)（当限值生效时）。
+- 目的：
+  - 为 PFSDF 的 SMAFDB 支撑增加位移上限，并且该上限固定，不受配置文件参数变化影响。
+
+3) PFSD_test 与主模型一致启用固定 MinMax
+- 文件：subroutines/PFSD_test.py
+- 变更：
+  - 从 SMAFDB 模块额外导入固定楼层限值映射 `_SMAFDB_FIXED_MINMAX_BY_STORY`。
+  - `make_series_material(...)` 增加 `minmax` 参数：
+    - 原为 `Series(SMA,Steel01)`；
+    - 现可选包裹为 `MinMax(Series)`。
+  - `run_hysteresis(...)` 增加 `minmax` 参数并传递至材料创建。
+  - 主循环按 `story_idx` 自动取固定限值并传入 `run_hysteresis`。
+- 说明：
+  - 在 PFSD_test 中仍是位移控制（SP 约束），横轴位移不会被“截断”；
+  - 限位效果表现为超过阈值后力学响应变化（如力降为 0）。
+
+4) 2026-02-25 新增：PFSDF 主模型显式在 SMAFDB 调用处传入 MinMax
+- 文件：models/MC8_PFSDF.py, models/MC8_PFSDF_-20.py, models/MC8_PFSDF_-10.py, models/MC8_PFSDF_0.py, models/MC8_PFSDF_10.py, models/MC8_PFSDF_20.py, models/MC8_PFSDF_30.py, models/MC8_PFSDF_40.py
+- 变更：
+  - 在 `pts_all = SMAFDB_pts(T)` 后增加 `pts1..pts8 = pts_all[:8]`。
+  - 增加固定限值：
+    - `MinMax1 = [-265.56745065656827, 265.56745065656827]`（首层）
+    - `MinMax2 = [-246.79145138320445, 246.79145138320445]`（2~8层）
+  - 所有 `SMAFDB(..., pts1)` 改为 `SMAFDB(..., pts1, MinMax=MinMax1)`。
+  - 所有 `SMAFDB(..., pts2..pts8)` 改为 `SMAFDB(..., ptsX, MinMax=MinMax2)`。
+- 校验：
+  - `python -m py_compile` 对上述 8 个模型文件检查通过。
+- 目的：
+  - 让 PFSDF 模型层面的调用显式携带位移限制，不依赖 SMAFDB 子程序内部自动映射。
+
+
+修改记录（3月4日）
+1）将PFSD的限值改成

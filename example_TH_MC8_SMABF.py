@@ -1,0 +1,41 @@
+import sys
+from pathlib import Path
+
+sys.path.append(Path.cwd().as_posix())
+
+import numpy as np
+
+from MRFcore.DataProcessing import DataProcessing
+from MRFcore.MRF import MRF
+
+
+if __name__ == "__main__":
+
+    # Groundmove_level = ['DBE','MCE','CLE']
+    # temperature = ['-20','-10','0','10','20','30','40']
+    Groundmove_level = ['MCE','ERE']
+    for level in Groundmove_level:
+
+        model_name = f'MC8_SMABF_20'
+        output_folder = Path('Output_data') / 'MC8_PFSDF' / f'MC8_TH_{level}_data'
+
+        # output_folder = Path(f'Output_data\\MC8_PFSDF\\MC8_TH_{level}_data')
+        
+        # 1. Perform time history analysis
+        note = 'time history of a four-story steel moment resisting frame'
+        model = MRF(model_name,Nstory=8 ,Nbay=3,heights=[5500, 4300, 4300, 4300, 4300, 4300, 4300, 4300], notes=note, script='py')
+        motion_list = [f'{i}' for i in range(1, 45) ]
+        model.select_ground_motions(motion_list, suffix='.txt')
+        T1 = np.loadtxt(Path('Output_data') / model_name / 'MC8_PO_out' / '周期(s).out')[0]
+        model.scale_ground_motions(method='c', para=(0.2*T1,1.5*T1),path_spec_code=Path(f'Spectrum\{level} Level Spectrum.txt')
+                                ,save_SF=True,plot=False)
+        model.set_running_parameters(Output_dir=output_folder, fv_duration=30, display=True, auto_quit=True,folder_exists='overwrite')
+        model.run_time_history(print_result=False, parallel=6)
+
+        # 2. Read results
+        model = DataProcessing(output_folder)
+        model.set_output_dir(output_folder.parent / (output_folder.name+'_out'), cover=1)
+        model.read_results('mode', 'IDR', 'CIDR', 'PFA', 'PFV', 'shear', 'panelZone', 'beamHinge', 'columnHinge', print_result=True)
+        model.read_th()
+
+    print('All done!')
