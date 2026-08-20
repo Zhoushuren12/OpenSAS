@@ -37,13 +37,14 @@ from .catalog import AnalysisCase, ResultCatalog
 from .plotting import PlotRequest, PlotService, normalize_temperature_label
 
 
-ANALYSES = [("Pushover", "PO"), ("时程分析", "TH"), ("IDA 分析", "IDA")]
+ANALYSES = [("Pushover", "PO"), ("时程分析", "TH"), ("IDA 分析", "IDA"), ("构件分析", "COMPONENT")]
 
 PLOT_TYPES = {
     "PO": [
         ("能力曲线：屋顶位移角—基底剪力", "capacity_drift"),
         ("能力曲线：屋顶位移—基底剪力", "capacity_displacement"),
         ("归一化能力曲线", "capacity_normalized"),
+        ("侧向力分布", "lateral_force_pattern"),
     ],
     "TH": [
         ("楼层响应剖面", "response_profile"),
@@ -61,6 +62,11 @@ PLOT_TYPES = {
         ("损伤超越概率", "exceedance"),
         ("IDA 计算次数检查", "convergence"),
     ],
+    "COMPONENT": [
+        ("梁铰滞回曲线", "beam_hysteresis"),
+        ("柱铰滞回曲线", "column_hysteresis"),
+        ("支撑滞回曲线", "brace_hysteresis"),
+    ],
 }
 
 TH_METRICS = [
@@ -76,6 +82,17 @@ TH_METRICS = [
 IDA_METRICS = [("层间位移角 IDR", "IDR"), ("残余层间位移角 RIDR", "RIDR"), ("楼层加速度 PFA", "PFA")]
 HINGE_METRICS = [("梁铰", "BEAM"), ("柱铰", "COLUMN"), ("节点域", "PANEL")]
 STATISTICS = [("中位数（50%）", "median"), ("平均值", "mean"), ("16% 分位", "p16"), ("84% 分位", "p84"), ("最大值", "max")]
+COMPONENT_SOURCES = [
+    ("时程分析", "TH"),
+    ("循环 Pushover", "CP"),
+    ("Pushover", "PO"),
+    ("IDA 分析", "IDA"),
+]
+COMPONENT_KINDS = {
+    "beam_hysteresis": "BEAM",
+    "column_hysteresis": "COLUMN",
+    "brace_hysteresis": "BRACE",
+}
 
 
 class PaintMainWindow(QMainWindow):
@@ -170,6 +187,11 @@ class PaintMainWindow(QMainWindow):
         self.parameter_form = QFormLayout(self.parameters_group)
         self.level_combo = QComboBox()
         self.metric_combo = QComboBox()
+        self.component_source_combo = QComboBox()
+        for label, value in COMPONENT_SOURCES:
+            self.component_source_combo.addItem(label, value)
+        self.component_file_combo = QComboBox()
+        self.component_file_combo.setEditable(True)
         self.statistic_combo = QComboBox()
         for label, value in STATISTICS:
             self.statistic_combo.addItem(label, value)
@@ -193,10 +215,12 @@ class PaintMainWindow(QMainWindow):
 
         self.parameter_rows: dict[str, tuple[QLabel, QWidget]] = {}
         for key, label, widget in [
+            ("source", "结果来源", self.component_source_combo),
             ("level", "地震水准", self.level_combo),
             ("metric", "响应指标", self.metric_combo),
             ("statistic", "统计方式", self.statistic_combo),
             ("record", "地震动记录", self.record_combo),
+            ("component", "构件文件", self.component_file_combo),
             ("story", "楼层", self.story_spin),
             ("ds", "损伤状态", self.ds_combo),
             ("sa", "Sa (g)", self.sa_spin),
@@ -355,6 +379,8 @@ class PaintMainWindow(QMainWindow):
         self.plot_type_combo.currentIndexChanged.connect(self._plot_type_changed)
         self.case_list.itemChanged.connect(self._case_changed)
         self.level_combo.currentIndexChanged.connect(self._refresh_records)
+        self.component_source_combo.currentIndexChanged.connect(self._component_source_changed)
+        self.record_combo.currentTextChanged.connect(self._refresh_component_files)
         self.select_all_button.clicked.connect(lambda: self._set_all_cases(True))
         self.clear_button.clicked.connect(lambda: self._set_all_cases(False))
         self.generate_button.clicked.connect(self.generate_plot)
@@ -397,8 +423,9 @@ class PaintMainWindow(QMainWindow):
             self.cases_by_item[id(item)] = case
         self.case_list.blockSignals(False)
         self._update_case_availability()
+        self._refresh_component_sources()
         self._refresh_levels()
-        self.status_label.setText(catalog.summary() if cases else "该目录下没有识别到 Pushover、时程或 IDA 结果。")
+        self.status_label.setText(catalog.summary() if cases else "该目录下没有识别到分析结果或构件原始结果。")
         if not cases and show_empty_dialog:
             QMessageBox.information(
                 self,
@@ -414,6 +441,7 @@ class PaintMainWindow(QMainWindow):
             self.plot_type_combo.addItem(label, value)
         self.plot_type_combo.blockSignals(False)
         self._update_case_availability()
+        self._refresh_component_sources()
         self._refresh_levels()
         self._plot_type_changed()
 
@@ -439,6 +467,7 @@ class PaintMainWindow(QMainWindow):
             if item.flags() & Qt.ItemIsEnabled:
                 item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
         self.case_list.blockSignals(False)
+        self._refresh_component_sources()
         self._refresh_records()
 
     def _selected_cases(self) -> list[AnalysisCase]:
@@ -452,8 +481,29 @@ class PaintMainWindow(QMainWindow):
         return selected
 
     def _case_changed(self, _item: QListWidgetItem) -> None:
+        self._refresh_component_sources()
         self._refresh_levels()
         self._refresh_records()
+
+    def _refresh_component_sources(self) -> None:
+        if (self.analysis_combo.currentData() or "PO") != "COMPONENT":
+            return
+        current = self.component_source_combo.currentData()
+        cases = self._selected_cases()
+        if not cases and self.catalog is not None:
+            cases = self.catalog.cases
+        available = {source for case in cases for source in case.available_component_sources}
+        ordered = [(label, value) for label, value in COMPONENT_SOURCES if value in available]
+        self.component_source_combo.blockSignals(True)
+        self.component_source_combo.clear()
+        for label, value in ordered:
+            self.component_source_combo.addItem(label, value)
+        values = [value for _, value in ordered]
+        if current in values:
+            self.component_source_combo.setCurrentIndex(values.index(current))
+        elif "TH" in values:
+            self.component_source_combo.setCurrentIndex(values.index("TH"))
+        self.component_source_combo.blockSignals(False)
 
     def _refresh_levels(self) -> None:
         if self.catalog is None:
@@ -474,14 +524,20 @@ class PaintMainWindow(QMainWindow):
     def _refresh_records(self, *_args) -> None:
         analysis = self.analysis_combo.currentData() or "PO"
         plot_type = self.plot_type_combo.currentData()
-        if analysis not in {"TH", "IDA"}:
+        source = self.component_source_combo.currentData() if analysis == "COMPONENT" else analysis
+        if source not in {"TH", "IDA"}:
+            if analysis == "COMPONENT":
+                self.record_combo.blockSignals(True)
+                self.record_combo.clear()
+                self.record_combo.blockSignals(False)
+                self._refresh_component_files()
             return
         current = self.record_combo.currentText().strip()
         level = self.level_combo.currentData() or ""
-        raw = plot_type == "time_history"
+        raw = analysis == "COMPONENT" or plot_type == "time_history"
         records: set[str] = set()
         for case in self._selected_cases():
-            records.update(case.records(analysis, level, raw=raw))
+            records.update(case.records(source, level, raw=raw))
         ordered = sorted(records, key=self._natural_key)
         self.record_combo.blockSignals(True)
         self.record_combo.clear()
@@ -489,6 +545,31 @@ class PaintMainWindow(QMainWindow):
         if current in ordered:
             self.record_combo.setCurrentText(current)
         self.record_combo.blockSignals(False)
+        self._refresh_component_files()
+
+    def _refresh_component_files(self, *_args) -> None:
+        if (self.analysis_combo.currentData() or "PO") != "COMPONENT":
+            return
+        kind = COMPONENT_KINDS.get(self.plot_type_combo.currentData())
+        if kind is None:
+            return
+        current = self.component_file_combo.currentText().strip()
+        source = self.component_source_combo.currentData() or ""
+        level = self.level_combo.currentData() or ""
+        record = self.record_combo.currentText().strip()
+        names: set[str] = set()
+        for case in self._selected_cases():
+            names.update(case.component_files(kind, source, level, record))
+        ordered = sorted(names, key=self._natural_key)
+        self.component_file_combo.blockSignals(True)
+        self.component_file_combo.clear()
+        self.component_file_combo.addItems(ordered)
+        if current in ordered:
+            self.component_file_combo.setCurrentText(current)
+        self.component_file_combo.blockSignals(False)
+
+    def _component_source_changed(self, *_args) -> None:
+        self._plot_type_changed()
 
     @staticmethod
     def _natural_key(value: str) -> tuple:
@@ -516,11 +597,16 @@ class PaintMainWindow(QMainWindow):
         if current_metric in values:
             self.metric_combo.setCurrentIndex(values.index(current_metric))
 
+        component_source = self.component_source_combo.currentData() or ""
+        component_analysis = analysis == "COMPONENT"
         visible = {
-            "level": analysis == "TH",
+            "source": component_analysis,
+            "level": analysis == "TH" or (component_analysis and component_source == "TH"),
             "metric": bool(metrics) and plot_type != "time_history",
             "statistic": plot_type in {"response_profile", "hinge_profile"},
-            "record": plot_type in {"record_profile", "time_history"},
+            "record": plot_type in {"record_profile", "time_history"}
+            or (component_analysis and component_source in {"TH", "IDA"}),
+            "component": component_analysis,
             "story": plot_type == "time_history",
             "ds": plot_type in {"fragility", "fragility_surface", "exceedance"},
             "sa": False,
@@ -550,6 +636,8 @@ class PaintMainWindow(QMainWindow):
             title=self.title_edit.text(),
             grid=self.grid_check.isChecked(),
             sa_value=self.sa_spin.value(),
+            source=self.component_source_combo.currentData() or "TH",
+            component_file=self.component_file_combo.currentText().strip(),
         )
         QApplication.setOverrideCursor(Qt.WaitCursor)
         self.generate_button.setEnabled(False)

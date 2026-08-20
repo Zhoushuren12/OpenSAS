@@ -10,6 +10,11 @@ import re
 _TEMPERATURE_SUFFIX = re.compile(r"^(?P<model>.+)_(?P<temperature>-?\d+(?:\.\d+)?)$")
 _TH_OUT = re.compile(r".*_TH_(?P<level>.+?)_data_out$", re.IGNORECASE)
 _TH_RAW = re.compile(r".*_TH_(?P<level>.+?)_data$", re.IGNORECASE)
+_COMPONENT_PREFIXES = {
+    "BEAM": ("beamspring",),
+    "COLUMN": ("colspring", "columnspring"),
+    "BRACE": ("sma", "brace", "brb"),
+}
 
 
 def _temperature_sort_value(value: str | None) -> tuple[int, float | str]:
@@ -29,6 +34,8 @@ class AnalysisCase:
     model: str
     temperature: str | None
     po_dir: Path | None = None
+    po_raw_dir: Path | None = None
+    cp_raw_dir: Path | None = None
     th_dirs: dict[str, Path] = field(default_factory=dict)
     th_raw_dirs: dict[str, Path] = field(default_factory=dict)
     ida_dir: Path | None = None
@@ -50,6 +57,22 @@ class AnalysisCase:
             values.append("TH")
         if self.ida_dir is not None or self.fragility_dir is not None:
             values.append("IDA")
+        if self.available_component_sources:
+            values.append("COMPONENT")
+        return tuple(values)
+
+    @property
+    def available_component_sources(self) -> tuple[str, ...]:
+        """Raw analysis sources that can contain component recorder files."""
+        values: list[str] = []
+        if self.th_raw_dirs:
+            values.append("TH")
+        if self.cp_raw_dir is not None:
+            values.append("CP")
+        if self.po_raw_dir is not None:
+            values.append("PO")
+        if self.ida_raw_dir is not None:
+            values.append("IDA")
         return tuple(values)
 
     def supports(self, analysis: str) -> bool:
@@ -68,6 +91,50 @@ class AnalysisCase:
         if root is None or not root.is_dir():
             return []
         names = [item.name for item in root.iterdir() if item.is_dir()]
+        return sorted(names, key=_natural_key)
+
+    def component_root(
+        self,
+        source: str,
+        level: str | None = None,
+        record: str | None = None,
+    ) -> Path | None:
+        """Resolve the raw folder containing component recorder files."""
+        source = source.upper()
+        if source == "TH":
+            root = self.th_raw_dirs.get(level or "")
+        elif source == "IDA":
+            root = self.ida_raw_dir
+        elif source == "CP":
+            return self.cp_raw_dir
+        elif source == "PO":
+            return self.po_raw_dir
+        else:
+            return None
+        if root is None or not record:
+            return None
+        candidate = root / record
+        return candidate if candidate.is_dir() else None
+
+    def component_files(
+        self,
+        kind: str,
+        source: str,
+        level: str | None = None,
+        record: str | None = None,
+    ) -> list[str]:
+        """List component recorder files for one raw analysis folder."""
+        root = self.component_root(source, level, record)
+        prefixes = _COMPONENT_PREFIXES.get(kind.upper(), ())
+        if root is None or not root.is_dir() or not prefixes:
+            return []
+        names = [
+            item.name
+            for item in root.iterdir()
+            if item.is_file()
+            and item.suffix.lower() == ".out"
+            and item.stem.lower().startswith(prefixes)
+        ]
         return sorted(names, key=_natural_key)
 
 
@@ -105,8 +172,11 @@ class ResultCatalog:
             names = {item.name for item in folder.iterdir() if item.is_dir()}
         except OSError:
             return False
-        return any(name.endswith(("_PO_out", "_IDA_data_out", "_IDA_data_frag")) for name in names) or any(
-            _TH_OUT.match(name) for name in names
+        return any(
+            name.upper().endswith(("_PO", "_PO_OUT", "_CP", "_IDA_DATA", "_IDA_DATA_OUT", "_IDA_DATA_FRAG"))
+            for name in names
+        ) or any(
+            _TH_OUT.match(name) or _TH_RAW.match(name) for name in names
         )
 
     @staticmethod
@@ -124,6 +194,8 @@ class ResultCatalog:
             return None
 
         po_dir: Path | None = None
+        po_raw_dir: Path | None = None
+        cp_raw_dir: Path | None = None
         ida_dir: Path | None = None
         ida_raw_dir: Path | None = None
         fragility_dir: Path | None = None
@@ -134,6 +206,12 @@ class ResultCatalog:
             upper = child.name.upper()
             if upper.endswith("_PO_OUT"):
                 po_dir = child
+            elif upper.endswith("_PO"):
+                payload = child / "Pushover"
+                po_raw_dir = payload if payload.is_dir() else child
+            elif upper.endswith("_CP"):
+                payload = child / "Cyclic_pushover"
+                cp_raw_dir = payload if payload.is_dir() else child
             elif upper.endswith("_IDA_DATA_OUT"):
                 ida_dir = child
             elif upper.endswith("_IDA_DATA"):
@@ -145,7 +223,7 @@ class ResultCatalog:
             elif match := _TH_RAW.match(child.name):
                 th_raw_dirs[match.group("level").upper()] = child
 
-        if not any((po_dir, th_dirs, ida_dir, fragility_dir)):
+        if not any((po_dir, po_raw_dir, cp_raw_dir, th_dirs, th_raw_dirs, ida_dir, ida_raw_dir, fragility_dir)):
             return None
         model, temperature = self._parse_case_name(folder.name)
         return AnalysisCase(
@@ -153,6 +231,8 @@ class ResultCatalog:
             model=model,
             temperature=temperature,
             po_dir=po_dir,
+            po_raw_dir=po_raw_dir,
+            cp_raw_dir=cp_raw_dir,
             th_dirs=th_dirs,
             th_raw_dirs=th_raw_dirs,
             ida_dir=ida_dir,
@@ -162,7 +242,11 @@ class ResultCatalog:
 
     def levels(self, cases: list[AnalysisCase] | None = None) -> list[str]:
         selected = cases if cases is not None else self.cases
-        levels = {level for case in selected for level in case.th_dirs}
+        levels = {
+            level
+            for case in selected
+            for level in (*case.th_dirs.keys(), *case.th_raw_dirs.keys())
+        }
         preferred = {"CLE": 0, "DBE": 1, "MCE": 2}
         return sorted(levels, key=lambda value: (preferred.get(value, 99), value))
 
@@ -171,8 +255,10 @@ class ResultCatalog:
             "PO": sum(case.po_dir is not None for case in self.cases),
             "TH": sum(bool(case.th_dirs) for case in self.cases),
             "IDA": sum(case.ida_dir is not None or case.fragility_dir is not None for case in self.cases),
+            "COMPONENT": sum(bool(case.available_component_sources) for case in self.cases),
         }
         return (
             f"识别到 {len(self.cases)} 个工况；"
-            f"Pushover {counts['PO']}，时程 {counts['TH']}，IDA {counts['IDA']}。"
+            f"Pushover {counts['PO']}，时程 {counts['TH']}，IDA {counts['IDA']}，"
+            f"构件原始结果 {counts['COMPONENT']}。"
         )

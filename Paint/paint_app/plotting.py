@@ -99,6 +99,8 @@ class PlotRequest:
     title: str = ""
     grid: bool = True
     sa_value: float = 1.0
+    source: str = "TH"
+    component_file: str = ""
 
 
 def _metric_scale(metric: str) -> float:
@@ -121,6 +123,66 @@ def _load_vector(path: Path) -> np.ndarray:
     if values.ndim == 2:
         values = values[:, -1]
     return values.reshape(-1)
+
+
+def _load_time(path: Path) -> tuple[np.ndarray, int]:
+    """Read the time column and return any leading static-step offset."""
+    if not path.exists():
+        raise FileNotFoundError(path)
+    values = np.asarray(np.loadtxt(path), dtype=float)
+    if values.ndim == 0:
+        raise ValueError(f"时间文件数据不足：{path}")
+    columns = values.reshape(-1, 1) if values.ndim == 1 else values.reshape(values.shape[0], -1)
+
+    candidates: list[tuple[float, int, np.ndarray]] = []
+    for column_index in range(columns.shape[1]):
+        column = columns[:, column_index]
+        if column.size < 2 or not np.all(np.isfinite(column)) or np.ptp(column) <= 0:
+            continue
+        differences = np.diff(column)
+        tolerance = max(float(np.ptp(column)), 1.0) * 1e-10
+        increasing_fraction = float(np.mean(differences >= -tolerance))
+        candidates.append((increasing_fraction, -column_index, column))
+    if not candidates:
+        raise ValueError(f"Time.out 中没有可识别的时间列：{path}")
+
+    increasing_fraction, _, time = max(candidates, key=lambda item: (item[0], item[1]))
+    if increasing_fraction < 0.9:
+        raise ValueError(f"Time.out 中没有基本单调递增的时间列：{path}")
+
+    tolerance = max(float(np.ptp(time)), 1.0) * 1e-10
+    resets = np.flatnonzero(np.diff(time) < -tolerance)
+    offset = int(resets[-1] + 1) if resets.size else 0
+    time = time[offset:]
+    if time.size < 2 or np.any(np.diff(time) < -tolerance):
+        raise ValueError(f"Time.out 的时间序列无效：{path}")
+    return time, offset
+
+
+def _load_component_xy(
+    path: Path,
+    *,
+    x_scale: float,
+    y_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read OpenSees stress-strain/force-deformation recorder output."""
+    if not path.exists():
+        raise FileNotFoundError(path)
+    values = np.asarray(np.loadtxt(path), dtype=float)
+    if values.ndim == 1:
+        if values.size < 2:
+            raise ValueError(f"构件文件至少需要两列：{path}")
+        values = values.reshape(1, -1)
+    if values.ndim != 2 or values.shape[1] < 2:
+        raise ValueError(f"构件文件至少需要两列：{path}")
+    x = values[:, 1] * x_scale
+    y = values[:, 0] * y_scale
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+    if x.size == 0:
+        raise ValueError(f"构件文件中没有有效数值：{path}")
+    return x, y
 
 
 def _statistic(values: np.ndarray, name: str, axis: int = 1) -> np.ndarray:
@@ -158,11 +220,15 @@ class PlotService:
             "capacity_drift": self._plot_capacity,
             "capacity_displacement": self._plot_capacity,
             "capacity_normalized": self._plot_capacity,
+            "lateral_force_pattern": self._plot_lateral_force_pattern,
             "response_profile": self._plot_response_profile,
             "response_boxplot": self._plot_response_boxplot,
             "record_profile": self._plot_record_profile,
             "time_history": self._plot_time_history,
             "hinge_profile": self._plot_hinge_profile,
+            "beam_hysteresis": self._plot_component_hysteresis,
+            "column_hysteresis": self._plot_component_hysteresis,
+            "brace_hysteresis": self._plot_component_hysteresis,
             "ida_curves": self._plot_ida_curves,
             "ida_quantiles": self._plot_ida_quantiles,
             "fragility": self._plot_fragility,
@@ -270,6 +336,42 @@ class PlotService:
         self._finish(axis, request)
         return figure
 
+    def _plot_lateral_force_pattern(self, request: PlotRequest) -> Figure:
+        figure, axis = self._new_figure()
+        plotted = 0
+        max_floor = 0
+        errors: list[str] = []
+        for case in request.cases:
+            try:
+                if case.po_raw_dir is None:
+                    raise FileNotFoundError(f"{case.display_name} 缺少 Pushover 原始结果")
+                values = np.abs(_load_vector(case.po_raw_dir / "Pattern.out"))
+                values = values[np.isfinite(values)]
+                total = float(np.sum(values))
+                if values.size == 0 or total <= 0:
+                    raise ValueError("Pattern.out 中没有有效的非零侧向力")
+                coefficients = values / total
+                floors = np.arange(1, coefficients.size + 1, dtype=float)
+                axis.plot(
+                    coefficients,
+                    floors,
+                    marker="s",
+                    markersize=6.0,
+                    linewidth=2.0,
+                    label=case.display_name,
+                )
+                plotted += 1
+                max_floor = max(max_floor, coefficients.size)
+            except Exception as exc:
+                errors.append(f"{case.display_name}: {exc}")
+        self._require_plotted(plotted, errors)
+        _set_axis_label(axis, "x", "Lateral force coefficient")
+        _set_axis_label(axis, "y", "Floor")
+        axis.set_yticks(np.arange(1, max_floor + 1))
+        axis.set_xlim(left=0.0)
+        self._finish(axis, request)
+        return figure
+
     @staticmethod
     def _stats_dir(case: AnalysisCase, level: str) -> Path:
         root = case.th_dirs.get(level)
@@ -372,12 +474,23 @@ class PlotService:
                 continue
             record_dir = root / request.record
             try:
-                top = _load_vector(record_dir / f"Disp{request.story + 1}.out")
-                bottom = _load_vector(record_dir / f"Disp{request.story}.out")
-                count = min(top.size, bottom.size)
-                response = (top[:count] - bottom[:count]) / heights[request.story - 1] * 100.0
+                drift_path = record_dir / f"SDR{request.story}.out"
+                if drift_path.exists():
+                    response = _load_vector(drift_path) * 100.0
+                else:
+                    if request.story > len(heights):
+                        raise ValueError(f"楼层 {request.story} 超出默认层高配置范围")
+                    top = _load_vector(record_dir / f"Disp{request.story + 1}.out")
+                    bottom = _load_vector(record_dir / f"Disp{request.story}.out")
+                    count = min(top.size, bottom.size)
+                    response = (top[:count] - bottom[:count]) / heights[request.story - 1] * 100.0
                 time_path = record_dir / "Time.out"
-                time = _load_vector(time_path)[:count] if time_path.exists() else np.arange(count) * 0.02
+                if time_path.exists():
+                    time, offset = _load_time(time_path)
+                    if offset and response.size >= time.size + offset:
+                        response = response[offset:]
+                else:
+                    time = np.arange(response.size, dtype=float) * 0.02
                 count = min(time.size, response.size)
                 axis.plot(time[:count], response[:count], linewidth=1.5, label=case.display_name)
                 plotted += 1
@@ -386,6 +499,49 @@ class PlotService:
         self._require_plotted(plotted, errors)
         _set_axis_label(axis, "x", "Time (s)")
         _set_axis_label(axis, "y", f"Story {request.story} IDR (%)")
+        self._finish(axis, request)
+        return figure
+
+    def _plot_component_hysteresis(self, request: PlotRequest) -> Figure:
+        configurations = {
+            "beam_hysteresis": ("BEAM", 1.0, 1.0e-6, "Rotation (rad)", "Moment (kN·m)"),
+            "column_hysteresis": ("COLUMN", 1.0, 1.0e-6, "Rotation (rad)", "Moment (kN·m)"),
+            "brace_hysteresis": ("BRACE", 1.0, 1.0e-3, "Displacement (mm)", "Force (kN)"),
+        }
+        kind, x_scale, y_scale, xlabel, ylabel = configurations[request.plot_type]
+        if not request.component_file:
+            raise ValueError("请选择构件文件。")
+        figure, axis = self._new_figure()
+        plotted = 0
+        errors: list[str] = []
+        for case in request.cases:
+            try:
+                root = case.component_root(request.source, request.level, request.record)
+                if root is None:
+                    raise FileNotFoundError(
+                        f"缺少 {request.source} 原始结果"
+                        + (f"（记录 {request.record}）" if request.record else "")
+                    )
+                available = case.component_files(
+                    kind,
+                    request.source,
+                    request.level,
+                    request.record,
+                )
+                if request.component_file not in available:
+                    raise FileNotFoundError(root / request.component_file)
+                x, y = _load_component_xy(
+                    root / request.component_file,
+                    x_scale=x_scale,
+                    y_scale=y_scale,
+                )
+                axis.plot(x, y, linewidth=2.0, label=case.display_name)
+                plotted += 1
+            except Exception as exc:
+                errors.append(f"{case.display_name}: {exc}")
+        self._require_plotted(plotted, errors)
+        _set_axis_label(axis, "x", xlabel)
+        _set_axis_label(axis, "y", ylabel)
         self._finish(axis, request)
         return figure
 
