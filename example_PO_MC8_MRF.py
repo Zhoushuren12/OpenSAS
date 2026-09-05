@@ -17,12 +17,12 @@ builtins.open = utf8_open
 
 if __name__ == "__main__":
 
-    model_name = 'MC8_SMRF'
+    model_name = 'MRF4S_AS'
     output_folder = Path('Output_data') / model_name / 'MC8_PO'
 
     # 1. Perform pushover analysis
     note = 'pushover analysis of a four-story steel moment resisting frame'
-    model = MRF(model_name,Nstory=8 ,Nbay=3,heights=[5500, 4300, 4300, 4300, 4300, 4300, 4300, 4300], notes=note, script='py')
+    model = MRF(model_name,Nstory=4 ,Nbay=2,heights=[4600, 3700, 3700, 3700], notes=note, script='py')
     model.set_running_parameters(Output_dir=output_folder, display=True, auto_quit=False)
     model.run_pushover(print_result=True)
     QuakeReadPushover(output_folder)
@@ -31,5 +31,5 @@ if __name__ == "__main__":
     model = DataProcessing(output_folder)
     model.set_output_dir(output_folder.parent / (output_folder.name+'_out'), cover=1)
     model.read_results('mode', 'IDR', 'CIDR', 'PFA', 'PFV', 'shear', 'panelZone', 'beamHinge', 'columnHinge', print_result=True)
-    model.read_pushover(H=18400)
+    model.read_pushover(H=15700)
 
