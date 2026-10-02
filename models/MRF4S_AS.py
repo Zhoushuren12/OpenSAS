@@ -568,7 +568,7 @@ def run_openseespy(
     ops.constraints("Plain")
     ops.numberer("RCM")
     ops.system("BandGeneral")
-    ops.test("NormDispIncr", 1.0e-5, 60)
+    ops.test("NormDispIncr", 1.0e-6, 60)
     ops.algorithm("Newton")
     ops.integrator("LoadControl", 0.1)
     ops.analysis("Static")

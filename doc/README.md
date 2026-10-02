@@ -72,7 +72,7 @@ set_running_parameters(
             display=True,
             mpco=False,
             log_name='日志',
-            maxRunTime: float=600,
+            maxRunTime: float=1800,
             auto_quit: bool=False,
             folder_exists: Literal['ask', 'overwrite', 'delete']='ask')
 ```
@@ -82,7 +82,7 @@ set_running_parameters(
 * display: 是否显示运行时结构的实时变形图(IDA计算或采用openseespy时不支持)  
 * mpco: 是否创建mpco文件，用于被STKO读取后处理(采用openseespy时不支持)  
 * log_name: 日志文件名  
-* maxRunTime: 最大允许运行时间(s)，默认600s  
+* maxRunTime: 最大允许运行时间(s)，默认1800s  
 * auto_quit: 计算完成时是否自动关闭监控窗口，默认False  
 * folder_exists: 如果输出文件夹`Output_dir`存在，如何处理。ask-询问，overwrite-覆盖，delete-删除
 

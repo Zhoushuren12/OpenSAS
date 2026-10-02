@@ -499,7 +499,7 @@ class MRF:
     def set_running_parameters(
             self, Output_dir: str | Path=None, OS_terminal: str='OpenSees351',
             fv_duration=0.0, display=True, mpco=False, log_name='日志',
-            maxRunTime: float=600, auto_quit: bool=False,
+            maxRunTime: float=1800, auto_quit: bool=False,
             folder_exists: Literal['ask', 'overwrite', 'delete']='ask'):
         """设置运行参数
 
@@ -512,7 +512,7 @@ class MRF:
             display (bool): 是否显示运行时结构的实时变形图(IDA计算或采用openseespy时不支持)  
             mpco (bool): 是否创建mpco文件，用于被STKO读取后处理(采用openseespy时不支持)  
             log_name (str): 日志文件名  
-            maxRunTime (float): 最大允许运行时间(s)，默认600s  
+            maxRunTime (float): 最大允许运行时间(s)，默认1800s  
             auto_quit (bool): 计算完成时是否自动关闭监控窗口，默认False  
             folder_exists (bool): 如果输出文件夹存在，如何处理。ask-询问，overwrite-覆盖，delete-删除
         """
